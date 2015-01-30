@@ -154,6 +154,9 @@ private:
   //called by constructor of PBXProj.loadProj();
   void initTargets();
 
+  //sets up targets to inherit build settings from the project.
+  void initInheritance();
+
   //contains targets count.
   int targetcount;
 
@@ -199,11 +202,66 @@ vector<PBXNativeTarget> PBXProj::getTargets()
   return this->targets;
 }
 
+void PBXProj::initInheritance()
+{
+  map<string, const PBXBlock *> projectBuildConfs;
+
+  const PBXBlock *proj = dynamic_cast<const PBXBlock *>(pDoc->deref((PBXValueRef*)pDoc->valueForKeyPath("rootObject")));
+
+  const PBXValueRef *proj_bcl_ref = dynamic_cast<const PBXValueRef*>(proj->valueForKey("buildConfigurationList"));
+  const PBXValue *proj_bcl_value = dynamic_cast<const PBXValue *>(pDoc->deref(proj_bcl_ref));
+  const PBXBlock *proj_bcl_blk = dynamic_cast<const PBXBlock*>(proj_bcl_value);
+
+  const PBXArray *proj_bcl_array = dynamic_cast<const PBXArray*>(proj_bcl_blk->valueForKey("buildConfigurations"));
+  for (PBXArray::const_iterator itor = proj_bcl_array->begin(); itor != proj_bcl_array->end(); itor++)
+  {
+    const PBXValueRef *ref = dynamic_cast<const PBXValueRef*>(*itor);
+    const PBXValue *value = pDoc->deref(ref);
+    const PBXBlock *pbc_blk = PBXBlock::cast(value);
+
+    const PBXText *name = dynamic_cast<const PBXText*>(pbc_blk->valueForKey("name"));
+    projectBuildConfs[string(name->text())] = pbc_blk;
+  }
+
+  const PBXArray *proj_targets = dynamic_cast<const PBXArray*>(proj->valueForKey("targets"));
+  for (PBXArray::const_iterator itor = proj_targets->begin(); itor != proj_targets->end(); itor++)
+  {
+    const PBXValueRef *tgt_ref = dynamic_cast<const PBXValueRef*>(*itor);
+    const PBXBlock *target = PBXBlock::cast(pDoc->deref(tgt_ref));
+
+    const PBXValueRef *tgt_bcl_ref = dynamic_cast<const PBXValueRef*>(target->valueForKey("buildConfigurationList"));
+    PBXBlock *tgt_bcl_blk = const_cast<PBXBlock *>(PBXBlock::cast(pDoc->deref(tgt_bcl_ref)));
+
+    tgt_bcl_blk->setParent(const_cast<PBXBlock *>(proj_bcl_blk));
+
+    const PBXArray *buildConfs = dynamic_cast<const PBXArray*>(tgt_bcl_blk->valueForKey("buildConfigurations"));
+    for (PBXArray::const_iterator itor = buildConfs->begin(); itor != buildConfs->end(); itor++)
+    {
+      const PBXValueRef *tgt_bc_ref = dynamic_cast<const PBXValueRef*>(*itor);
+      PBXBlock *tgt_bc_blk = (PBXBlock *)PBXBlock::cast(pDoc->deref(tgt_bc_ref));
+
+      string configurationName = string(PBXText::cast(tgt_bc_blk->valueForKey("name"))->text());
+      if (projectBuildConfs.find(configurationName) != projectBuildConfs.end())
+      {
+        // I don't think we really need to set the XCBuildConfiguration's parents, only their 'buildSettings' block.
+        const PBXBlock *parentBuildConfiguration = projectBuildConfs[configurationName];
+        tgt_bc_blk->setParent((PBXBlock *)parentBuildConfiguration);
+
+        PBXBlock *parentBuildSettings = (PBXBlock *)PBXBlock::cast(parentBuildConfiguration->valueForKey("buildSettings"));
+        PBXBlock *childBuildSettings = (PBXBlock *)PBXBlock::cast(tgt_bc_blk->valueForKey("buildSettings"));
+        childBuildSettings->setParent(parentBuildSettings);
+      }
+    }
+  }
+}
+
 void PBXProj::initTargets()
 {
   const PBXArray *target_arr = dynamic_cast<const PBXArray*>(pDoc->valueForKeyPath("rootObject.targets"));
   if(!target_arr)
     return;
+
+  initInheritance();
 
   //get target count from "Project object"
   this->targetcount =  target_arr->count();

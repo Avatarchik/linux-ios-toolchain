@@ -14,6 +14,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 PBXBlock::PBXBlock()
 {
+    mParent = NULL;
 }
 
 PBXBlock::~PBXBlock()
@@ -37,11 +38,24 @@ void PBXBlock::addStatement(PBXItem* statement)
     }
 }
 
+void PBXBlock::setParent(PBXBlock *parent)
+{
+    mParent = parent;
+}
+
 const PBXValue* PBXBlock::valueForKey(const char* name) const
+{
+    return valueForKey(name, true);
+}
+
+const PBXValue* PBXBlock::valueForKey(const char* name, bool inherit) const
 {
     PBXValueMap::const_iterator itor = mValueMap.find(name);
     if (itor != mValueMap.end()) {
         return  itor->second;
+    }
+    if (inherit && mParent) {
+        return  mParent->valueForKey(name, true);
     }
     return NULL;
 }

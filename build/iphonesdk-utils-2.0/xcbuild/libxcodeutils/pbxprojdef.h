@@ -64,15 +64,18 @@ class PBXBlock : public PBXValue {
     typedef std::map<const std::string, const PBXValue*> PBXValueMap;
     PBXValueMap  mValueMap;
     PBXItemList  mStatements;
+    PBXBlock 	*mParent;
     PBXBlock(const PBXItemList& other);
 public:
     typedef PBXItemList::const_iterator    const_iterator;
     typedef PBXItemList::iterator          iterator;
-    
+
     PBXBlock();
     virtual ~PBXBlock();
     void addStatement(PBXItem* statement);    
+    void setParent(PBXBlock *parent);
     const PBXValue* valueForKey(const char* name) const;
+    const PBXValue* valueForKey(const char* name, bool inherit) const;
     
     PBXItemList::const_iterator begin() const;
     PBXItemList::const_iterator end()   const;
