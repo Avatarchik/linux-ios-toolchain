@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <limits.h>
 
 #include "libxcodeutils/pbxprojdef.h"
 
@@ -47,6 +48,12 @@ bool endWith(const string str,const string needle) {
     return (0 == str.compare (str.length() - needle.length(), needle.length(), needle));
   }
   return false;
+}
+
+std::string remove_quotes(const char *str) {
+  if (*str != '"')
+    return string(str);
+  return string(str + 1, strlen(str) - 2);
 }
 
 std::string m_replace(std::string str,std::string pattern,std::string dstPattern,int count)
@@ -127,6 +134,7 @@ public:
   void loadProj(string path);
   int getTargetCount();
   vector<PBXNativeTarget> getTargets();
+  string getProjectName();
 
 private:
   //extract all files project contains to allFiles;
@@ -165,6 +173,8 @@ private:
 
   //contains all files in project.
   map<string,string> allFiles;
+
+  string name;
  
   PBXFile *pDoc;
 };
@@ -183,6 +193,19 @@ void PBXProj::loadProj(string path)
   string projectFile(projectDir);
   loadProject(projectFile.c_str(), &pDoc);
 
+  char namebuf[PATH_MAX];
+  if (realpath(path.c_str(), namebuf)) {
+    string fullPath(namebuf);
+    if (endWith(fullPath, ".pbxproj")) {
+      char *tmp = strdup(namebuf);
+      strncpy(namebuf, dirname(tmp), PATH_MAX);
+      free(tmp);
+    }
+    string pjName(basename(namebuf));
+    if (endWith(pjName, ".xcodeproj"))
+      this->name = pjName.substr(0, pjName.size() - 10);
+  }
+
   //loading all files in project when opened.
   const PBXValueRef* ref = dynamic_cast<const PBXValueRef*>(pDoc->valueForKeyPath("rootObject.mainGroup"));
   const PBXValue *value = pDoc->deref(ref);
@@ -200,6 +223,11 @@ int PBXProj::getTargetCount()
 vector<PBXNativeTarget> PBXProj::getTargets()
 {
   return this->targets;
+}
+
+string PBXProj::getProjectName()
+{
+  return this->name;
 }
 
 void PBXProj::initInheritance()
@@ -467,16 +495,21 @@ void PBXProj::getFilesFromFileArray(const PBXArray *files_arr, buildPhase bptype
 	file.lastKnownFileType = file_lastKnownFileType->text();
       const PBXText * file_name = dynamic_cast<const PBXText*>(file_blk->valueForKey("name"));
       if(file_name)
-	file.name = file_name->text();
+	file.name = remove_quotes(file_name->text());
 
       const PBXText * file_path = dynamic_cast<const PBXText*>(file_blk->valueForKey("path"));
       if(file_path) {
-	string local_path = file_path->text();
+	string local_path = remove_quotes(file_path->text());
 	string full_path =local_path;
 	if(this->allFiles.find(local_path) != this->allFiles.end())
 	  full_path = this->allFiles.find(local_path)->second;
 	full_path = m_replace(full_path, "\"", "", -1);
 	file.path = full_path;
+
+	// pbxproj file might not have given 'name' if 'name' == 'path'.
+	if (!file.name.size()) {
+	  file.name = basename(strdup(full_path.c_str()));
+	}
       }
     }
     else if(isa == "PBXReferenceProxy") {
@@ -524,14 +557,21 @@ void PBXProj::getAllFilesFromMainGroup(const PBXBlock *block, string current_pat
   const PBXText *isa =dynamic_cast<const PBXText*>(block->valueForKey("isa"));
   if(isa)
     block_type = isa->text();
+
+  const PBXText *tree = dynamic_cast<const PBXText*>(block->valueForKey("sourceTree"));
+  if (tree && tree->text() && !strcmp(tree->text(), "SOURCE_ROOT"))
+    local_path = ".";
   
+  string pathname;
   const PBXText * path = dynamic_cast<const PBXText*>(block->valueForKey("path"));
-  if(path)
-    local_path = local_path+"/"+path->text();
+  if(path) {
+    pathname = remove_quotes(path->text());
+    local_path = local_path+"/"+pathname;
+  }
 
   if(block_type == "PBXFileReference") {
     // cout<<local_path<<endl;
-    allFiles.insert(pair<string,string>(path->text(), local_path));
+    allFiles.insert(pair<string,string>(pathname, local_path));
     //    this->allFiles.push_back(local_path);
   } else if (block_type == "PBXGroup" || block_type == "PBXVariantGroup") {
     const PBXArray *arr = dynamic_cast<const PBXArray *>(block->valueForKey("children"));
@@ -787,16 +827,18 @@ string PBXProj::getBuildSettings(const PBXBlock *block)
   local_header_path.erase(unique(local_header_path.begin(), local_header_path.end()), local_header_path.end()); 
   
   for(int i = 0; i < local_header_path.size(); i++) {
-    buildargs = buildargs + " -I" + local_header_path[i];
+    buildargs = buildargs + " -I\"$(SRCROOT)/" + local_header_path[i] + "\"";
   }
   return buildargs;
 }
 
-void convertMakefile(PBXNativeTarget target, targetType type)
+void convertMakefile(PBXProj *project, PBXNativeTarget target, targetType type)
 {
   string compiler = "ios-clang";
   string buildargs = target.buildargs;
   string output = target.result.substr(0,target.result.find(".app"));
+  string projname = project ? project->getProjectName() : output;
+  projname = projname.size() ? projname : output;
 
   if(type == FRAMEWORK)
     output = m_replace(output, ".framework", "", -1); 
@@ -812,7 +854,7 @@ void convertMakefile(PBXNativeTarget target, targetType type)
   for(int i = 0; i < headerpaths.size(); i++) {
     buildargs = buildargs + " -I" + headerpaths[i];
   }
-  buildargs += " -I.";
+  buildargs += " -I\"$(SRCROOT)\"";
 
   ofstream makefile("./Makefile");
   if(type == APP)
@@ -824,6 +866,22 @@ void convertMakefile(PBXNativeTarget target, targetType type)
     makefile << "APPFOLDER:=xcbuild/$(PROJECTNAME).app" <<endl;
     makefile << "INSTALLFOLDER:=$(PROJECTNAME).app"<<endl;
   }
+
+  makefile << endl;
+  makefile << "# Build Directory Settings" << endl
+           << "SRCROOT=$(realpath $(dir $(lastword $(MAKEFILE_LIST))))" << endl
+           << "CONFIGURATION=Release" << endl
+           << "TARGET_NAME=" << m_replace(target.name, " ", "_", -1) << endl
+           << "PROJECT_NAME=" << projname << endl
+           << "PRODUCT_NAME=" << output << endl
+           << "OBJROOT=$(SRCROOT)/xcbuild" << endl
+           << "SYMROOT=$(SRCROOT)/xcbuild" << endl
+           << "PROJECT_TEMP_DIR=$(OBJROOT)/$(PROJECT_NAME).build" << endl
+           << "BUILT_PRODUCTS_DIR=$(CONFIGURATION_BUILD_DIR)" << endl
+           << "CONFIGURATION_BUILD_DIR=$(SYMROOT)/$(CONFIGURATION)" << endl
+           << "CONFIGURATION_TEMP_DIR=$(PROJECT_TEMP_DIR)/$(CONFIGURATION)" << endl
+           << "TARGET_TEMP_DIR=$(CONFIGURATION_TEMP_DIR)/$(TARGET_NAME).build" << endl
+           << "OBJECT_FILE_DIR=$(TARGET_TEMP_DIR)/Objects" << endl;
   
   makefile << endl;
   makefile << "CC:=ios-clang" <<endl;
@@ -873,25 +931,25 @@ void convertMakefile(PBXNativeTarget target, targetType type)
     makefile << "all: $(PROJECTNAME)"<<endl<<endl;
 
   makefile << "OBJS+=  \\"<<endl;
-  for(int i = 0; i < sourcepaths.size(); i++) {
-    string object = m_replace(sourcepaths[i], ".m", ".o", -1);
+  for(int i = 0; i < target.sources.size(); i++) {
+    string object = m_replace(target.sources[i].name, ".m", ".o", -1);
     object = m_replace(object, ".c", ".o", -1);
     object = m_replace(object, ".cpp", ".o", -1);
-    if(i == sourcepaths.size()-1)
-      makefile << "\t"<<object<<endl;
+    if(i == target.sources.size()-1)
+      makefile << "\t$(OBJECT_FILE_DIR)/"<<object<<endl;
     else
-      makefile << "\t"<<object<<" \\"<<endl;
+      makefile << "\t$(OBJECT_FILE_DIR)/"<<object<<" \\"<<endl;
   }
   makefile << endl;
-  makefile << "$(PROJECTNAME): \\"<<endl;
-  for(int i = 0; i < sourcepaths.size(); i++) {
-    string object = m_replace(sourcepaths[i], ".m", ".o", -1);
+  makefile << "$(PROJECTNAME): auxfiles \\"<<endl;
+  for(int i = 0; i < target.sources.size(); i++) {
+    string object = m_replace(target.sources[i].name, ".m", ".o", -1);
     object = m_replace(object, ".c", ".o", -1);
     object = m_replace(object, ".cpp", ".o", -1);
-    if(i == sourcepaths.size()-1)
-      makefile << "\t"<<object<<endl;
+    if(i == target.sources.size()-1)
+      makefile << "\t$(OBJECT_FILE_DIR)/"<<object<<endl;
     else
-      makefile << "\t"<<object<<" \\"<<endl;
+      makefile << "\t$(OBJECT_FILE_DIR)/"<<object<<" \\"<<endl;
   }
 
   if(type == APP || type == EXEC) { 
@@ -902,19 +960,25 @@ void convertMakefile(PBXNativeTarget target, targetType type)
     makefile << "\t$(CC) $(CFLAGS) $(LDFLAGS) $(filter %.o,$^) -o xcbuild/$(PROJECTNAME).framework/$@"<<endl<<endl;
   } else if(type == STATICLIB) {
     makefile << "\tmkdir -p xcbuild"<<endl;
-    makefile << "\tarm-apple-darwin11-ar cr xcbuild/"<<output<<" $(filter %.o,$^)"<<endl<<endl;
+    makefile << "\tarm-apple-darwin-ar cr xcbuild/"<<output<<" $(filter %.o,$^)"<<endl<<endl;
   }
 
-  for(int i = 0; i < sourcepaths.size(); i++) {
-    string object = m_replace(sourcepaths[i], ".m", ".o", -1);
+  for(int i = 0; i < target.sources.size(); i++) {
+    string object = m_replace(target.sources[i].name, ".m", ".o", -1);
     object = m_replace(object, ".c", ".o", -1);
     object = m_replace(object, ".cpp", ".o", -1);
-    makefile << object <<": "<<sourcepaths[i]<<endl;
-    if(endWith(sourcepaths[i],".cpp"))
+    makefile << "$(OBJECT_FILE_DIR)/" << object <<": "<< "$(SRCROOT)/" << target.sources[i].path<<endl;
+    if(endWith(target.sources[i].path,".cpp"))
       makefile << "\t$(CPP) -c $(CPPFLAGS) "<< target.sources[i].cflag << " $< -o $@"<<endl<<endl;
     else
       makefile << "\t$(CC) -c $(CFLAGS) "<<target.sources[i].cflag<< " $< -o $@"<<endl<<endl;
   }
+
+    makefile << "auxfiles:" << endl
+             << "\tmkdir -p "
+             << "$(OBJECT_FILE_DIR)"
+             << endl
+             << endl;
 
   if(type == STATICLIB) {
     makefile << "headers:"<<endl;
@@ -1007,16 +1071,16 @@ void convertMakefile(PBXNativeTarget target, targetType type)
 }
 
 
-void convertTarget(PBXNativeTarget target, int compile)
+void convertTarget(PBXProj *project, PBXNativeTarget target, int compile)
 {
   if(target.resulttype == "archive.ar")
-    convertMakefile(target, STATICLIB);
+    convertMakefile(project, target, STATICLIB);
   else if(target.resulttype == "wrapper.application")
-    convertMakefile(target, APP);
+    convertMakefile(project, target, APP);
   else if(target.resulttype == "compiled.mach-o.executable")
-    convertMakefile(target, EXEC);
+    convertMakefile(project, target, EXEC);
   else if(target.resulttype == "wrapper.framework")
-    convertMakefile(target, FRAMEWORK);
+    convertMakefile(project, target, FRAMEWORK);
   else
     cout <<"Not supported yet."<<endl;
   if(compile)
@@ -1080,9 +1144,9 @@ int main(int argc, char* argv[])
 	cin.sync();
       }
     } while(input > target_count || input < 0);
-    convertTarget(targets[input], willcompile);
+    convertTarget(pbx, targets[input], willcompile);
   } else 
-    convertTarget(targets[0], willcompile);
+    convertTarget(pbx, targets[0], willcompile);
   
   return 0;
 }
