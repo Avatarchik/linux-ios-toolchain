@@ -760,6 +760,112 @@ string PBXProj::getInfoPlist(const PBXBlock *block)
   return infoplist;
 }
 
+static void getSimpleBuildFlags(string &buildargs, const PBXBlock *buildSettings)
+{
+  struct option {
+    const char *setting_name;
+    bool default_set;
+    const char *true_flag;
+    const char *false_flag;
+  };
+  const option options[] = {
+    { "CLANG_ENABLE_MODULES", false, " -fmodules", NULL },
+    { "CLANG_ENABLE_OBJC_ARC", false, " -fobjc-arc", NULL },
+    { "DEAD_CODE_STRIPPING", false, " -dead_strip", NULL },
+    { "ENABLE_NS_ASSERTIONS", true, NULL, " -DNS_BLOCK_ASSERTIONS" },
+    { "GCC_DYNAMIC_NO_PIC", false, " -mdynamic-no-pic", NULL }, 
+    { "GCC_WARN_INHIBIT_ALL_WARNINGS", false, " -w", NULL },
+    { "GCC_INLINES_ARE_PRIVATE_EXTERN", false, " -fvisibility-inlines-hidden", NULL },
+    { "GCC_REUSE_STRINGS", true, NULL, " -fwritable-strings" },
+    { "GCC_TREAT_IMPLICIT_FUNCTION_DECLARATIONS_AS_ERRORS", false, " -Werror-implicit-function-declaration", NULL },
+    { "GCC_TREAT_NONCONFORMANT_CODE_ERRORS_AS_WARNINGS", false, " -fpermissive", NULL },
+    { "GCC_TREAT_WARNINGS_AS_ERRORS", false, " -Werror", NULL },
+    { "LINK_WITH_STANDARD_LIBRARIES", true, NULL, " -nostdlib" },
+  };
+
+  const int COUNT = sizeof(options) / sizeof(options[0]);
+  for (int i = 0; i < COUNT; ++i) {
+    const option &opt = options[i];
+    const PBXText * arc = dynamic_cast<const PBXText *>(buildSettings->valueForKey(opt.setting_name));
+    bool value = opt.default_set;
+    if(arc && !strcmp(arc->text(), "YES"))
+      value = true;
+    else if (arc && !strcmp(arc->text(), "NO"))
+      value = false;
+    if (value && opt.true_flag)
+      buildargs = buildargs + opt.true_flag;
+    else if (!value && opt.false_flag)
+      buildargs = buildargs + opt.false_flag;
+  }
+}
+
+static void getWarningBuildFlags(string &buildargs, const PBXBlock *buildSettings)
+{
+  struct warning {
+    const char *setting_name;
+    const char *flag;
+  };
+  const warning warnings[] = {
+        { "CLANG_WARN_BOOL_CONVERSION", "bool-conversion" },
+        { "CLANG_WARN_CONSTANT_CONVERSION", "constant-conversion" },
+        { "CLANG_WARN_DIRECT_OBJC_ISA_USAGE", "deprecated-objc-isa-usage" },
+        { "CLANG_WARN_EMPTY_BODY", "empty-body" },
+        { "CLANG_WARN_ENUM_CONVERSION", "enum-conversion" },
+        { "CLANG_WARN_INT_CONVERSION", "int-conversion" },
+        { "CLANG_WARN_OBJC_ROOT_CLASS", "objc-root-class" },
+        { "CLANG_WARN__DUPLICATE_METHOD_MATCH", "duplicate-method-match" },
+        { "GCC_WARN_64_TO_32_BIT_CONVERSION", "shorten-64-to-32" },
+        { "GCC_WARN_ABOUT_GLOBAL_CONSTRUCTORS", "global-constructors" },
+        { "GCC_WARN_ABOUT_MISSING_FIELD_INITIALIZERS", "missing-field-initializers" },
+        { "GCC_WARN_ABOUT_MISSING_NEWLINE", "newline-eof" },
+        { "GCC_WARN_ABOUT_MISSING_PROTOTYPES", "missing-prototypes" },
+        { "GCC_WARN_ABOUT_RETURN_TYPE", "return-type" },
+        { "GCC_WARN_CHECK_SWITCH_STATEMENTS", "switch" },
+        { "GCC_WARN_EFFECTIVE_CPLUSPLUS_VIOLATIONS", "effc++" },
+        { "GCC_WARN_FOUR_CHARACTER_CONSTANTS", "four-char-constants" },
+        { "GCC_WARN_HIDDEN_VIRTUAL_FUNCTIONS", "overloaded-virtual" },
+        { "GCC_WARN_INITIALIZER_NOT_FULLY_BRACKETED", "missing-braces" },
+        { "GCC_WARN_MISSING_PARENTHESES", "parentheses" },
+        { "GCC_WARN_MULTIPLE_DEFINITION_TYPES_FOR_SELECTOR", "selector" },
+        { "GCC_WARN_NON_VIRTUAL_DESTRUCTOR", "non-virtual-dtor" },
+        { "GCC_WARN_PROTOTYPE_CONVERSION", "conversion" },
+        { "GCC_WARN_SHADOW", "shadow" },
+        { "GCC_WARN_STRICT_SELECTOR_MATCH", "strict-selector-match" },
+        { "GCC_WARN_UNDECLARED_SELECTOR", "undeclared-selector" },
+        { "GCC_WARN_UNINITIALIZED_AUTOS", "uninitialized" },
+        { "GCC_WARN_UNKNOWN_PRAGMAS", "unknown-pragmas" },
+        { "GCC_WARN_UNUSED_FUNCTION", "unused-function" },
+        { "GCC_WARN_UNUSED_LABEL", "unused-label" },
+        { "GCC_WARN_UNUSED_PARAMETER", "unused-parameter" },
+        { "GCC_WARN_UNUSED_VALUE", "unused-value" },
+        { "GCC_WARN_UNUSED_VARIABLE", "unused-variable" },
+  };
+
+  const int count = sizeof(warnings)/sizeof(warnings[0]);
+  for (int i = 0; i < count; ++i) {
+    const warning &w = warnings[i];
+    const PBXText *setting = dynamic_cast<const PBXText *>(buildSettings->valueForKey(w.setting_name));
+    if (!setting)
+      continue;
+    const char *value = setting->text();
+    if (!strcmp(value, "NO"))
+      continue;
+    if (!strcmp(value, "YES"))
+      buildargs = buildargs + " -W" + w.flag;
+    else if (!strcmp(value, "YES_ERROR") || !strcmp(value, "YES_AGGRESSIVE"))
+      buildargs = buildargs + " -Werror=" + w.flag;
+  }
+
+  const PBXText *value = dynamic_cast<const PBXText *>(buildSettings->valueForKey("GCC_WARN_PEDANTIC"));
+  if (value) {
+    const char *str = value->text();
+    if (!strcmp(str, "YES"))
+      buildargs = buildargs + " -pedantic";
+    else if (!strcmp(str, "YES_ERROR") || !strcmp(str, "YES_AGGRESSIVE"))
+      buildargs = buildargs + " -Werror=pedantic";
+  }
+}
+
 string PBXProj::getBuildSettings(const PBXBlock *block)
 {
   string buildargs = "";
@@ -790,15 +896,27 @@ string PBXProj::getBuildSettings(const PBXBlock *block)
     const PBXBlock * settings = dynamic_cast<const PBXBlock *>(blk->valueForKey("buildSettings"));
     if(!settings)
       continue;
-    const PBXText * arc = dynamic_cast<const PBXText *>(settings->valueForKey("CLANG_ENABLE_OBJC_ARC"));
-    if(arc && arc->text() == string("YES"))
-      buildargs = buildargs + " -fobjc-arc";
+
+    getSimpleBuildFlags(buildargs, settings);
+    getWarningBuildFlags(buildargs, settings);
+
+    // Prefix Header
     const PBXText * pch = dynamic_cast<const PBXText *>(settings->valueForKey("GCC_PRECOMPILE_PREFIX_HEADER"));
-    if(pch && pch->text() == string("YES")) {
-      const PBXText *pch_path = dynamic_cast<const PBXText *>(settings->valueForKey("GCC_PREFIX_HEADER"));
-      if(pch_path)
-	buildargs = buildargs + " -include " + pch_path->text();
-    }
+    bool prefix_precompile = (pch && pch->text() == string("YES"));
+
+    const PBXText *pch_path = dynamic_cast<const PBXText *>(settings->valueForKey("GCC_PREFIX_HEADER"));
+    if(pch_path)
+      buildargs = buildargs + " -include " + pch_path->text();
+
+    const PBXValue *opt_level = settings->valueForKey("GCC_OPTIMIZATION_LEVEL");
+    const PBXText *opt_level_t;
+    const PBXInteger *opt_level_i;
+    if (opt_level && (opt_level_t = dynamic_cast<const PBXText*>(opt_level)))
+      buildargs = buildargs + " -O" + opt_level_t->text();
+    else if (opt_level && (opt_level_i = dynamic_cast<const PBXInteger*>(opt_level)))
+      buildargs = buildargs + " -O" + string(1, '0' + (char)opt_level_i->intValue());    
+
+    // Header Search Paths
     const PBXArray *hsp_arr = dynamic_cast<const PBXArray*>(settings->valueForKey("HEADER_SEARCH_PATHS"));
     if(hsp_arr) {
       PBXValueList::const_iterator hsp_itor = hsp_arr->begin();
@@ -808,6 +926,24 @@ string PBXProj::getBuildSettings(const PBXBlock *block)
         if(hsp_path && hsp_path->text())
           buildargs = buildargs + " -I" + hsp_path->text();
       }
+    }
+    const PBXText *hsp_txt = dynamic_cast<const PBXText*>(settings->valueForKey("HEADER_SEARCH_PATHS"));
+    if (hsp_txt && hsp_txt->text()) {
+      buildargs = buildargs + " -iquote " + hsp_txt->text();
+    }
+    const PBXArray *uhsp_arr = dynamic_cast<const PBXArray*>(settings->valueForKey("USER_HEADER_SEARCH_PATHS"));
+    if(uhsp_arr) {
+      PBXValueList::const_iterator uhsp_itor = uhsp_arr->begin();
+      PBXValueList::const_iterator uhsp_end  = uhsp_arr->end();
+      for(; uhsp_itor != uhsp_end; uhsp_itor++){
+        const PBXText *uhsp_path = dynamic_cast<const PBXText *> (*uhsp_itor);
+        if(uhsp_path && uhsp_path->text())
+          buildargs = buildargs + " -iquote " + uhsp_path->text();
+      }
+    }
+    const PBXText *uhsp_txt = dynamic_cast<const PBXText*>(settings->valueForKey("USER_HEADER_SEARCH_PATHS"));
+    if (uhsp_txt && uhsp_txt->text()) {
+      buildargs = buildargs + " -iquote " + uhsp_txt->text();
     }
   }
   
@@ -829,6 +965,9 @@ string PBXProj::getBuildSettings(const PBXBlock *block)
   for(int i = 0; i < local_header_path.size(); i++) {
     buildargs = buildargs + " -I\"$(SRCROOT)/" + local_header_path[i] + "\"";
   }
+
+  // dependency generation.
+  buildargs = buildargs + " -MMD";
   return buildargs;
 }
 
@@ -869,11 +1008,11 @@ void convertMakefile(PBXProj *project, PBXNativeTarget target, targetType type)
 
   makefile << endl;
   makefile << "# Build Directory Settings" << endl
-           << "SRCROOT=$(realpath $(dir $(lastword $(MAKEFILE_LIST))))" << endl
-           << "CONFIGURATION=Release" << endl
-           << "TARGET_NAME=" << m_replace(target.name, " ", "_", -1) << endl
-           << "PROJECT_NAME=" << projname << endl
-           << "PRODUCT_NAME=" << output << endl
+           << "SRCROOT:=$(realpath $(dir $(lastword $(MAKEFILE_LIST))))" << endl
+           << "CONFIGURATION:=Release" << endl
+           << "TARGET_NAME:=" << m_replace(target.name, " ", "_", -1) << endl
+           << "PROJECT_NAME:=" << projname << endl
+           << "PRODUCT_NAME:=" << output << endl
            << "OBJROOT=$(SRCROOT)/xcbuild" << endl
            << "SYMROOT=$(SRCROOT)/xcbuild" << endl
            << "PROJECT_TEMP_DIR=$(OBJROOT)/$(PROJECT_NAME).build" << endl
@@ -963,6 +1102,7 @@ void convertMakefile(PBXProj *project, PBXNativeTarget target, targetType type)
     makefile << "\tarm-apple-darwin-ar cr xcbuild/"<<output<<" $(filter %.o,$^)"<<endl<<endl;
   }
 
+  vector<string> deplistIncludes;
   for(int i = 0; i < target.sources.size(); i++) {
     string object = m_replace(target.sources[i].name, ".m", ".o", -1);
     object = m_replace(object, ".c", ".o", -1);
@@ -972,13 +1112,24 @@ void convertMakefile(PBXProj *project, PBXNativeTarget target, targetType type)
       makefile << "\t$(CPP) -c $(CPPFLAGS) "<< target.sources[i].cflag << " $< -o $@"<<endl<<endl;
     else
       makefile << "\t$(CC) -c $(CFLAGS) "<<target.sources[i].cflag<< " $< -o $@"<<endl<<endl;
+
+    // Include dependency list.
+    string deplist = object;
+    deplist[deplist.size() - 1] = 'd';
+    deplistIncludes.push_back(deplist);
   }
 
-    makefile << "auxfiles:" << endl
-             << "\tmkdir -p "
-             << "$(OBJECT_FILE_DIR)"
-             << endl
-             << endl;
+  for (int i = 0; i < deplistIncludes.size(); i++) {
+    const string &deplist = deplistIncludes[i];
+    makefile << "-include $(OBJECT_FILE_DIR)/" << deplist << endl;
+  }
+  makefile << endl;
+
+  makefile << "auxfiles:" << endl
+           << "\tmkdir -p "
+           << "$(OBJECT_FILE_DIR)"
+           << endl
+           << endl;
 
   if(type == STATICLIB) {
     makefile << "headers:"<<endl;
